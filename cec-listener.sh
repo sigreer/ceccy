@@ -10,7 +10,55 @@ fi
 echo "[CEC-LISTENER] kdialog found. Starting main loop."
 
 # Configurable cec-client options
-CEC_CLIENT_CMD="sudo cec-client -d 8 -t p -p 1"
+CEC_DEVICE="/dev/ttyACM0"
+CEC_CLIENT_CMD="sudo cec-client -d 8 -t p -p 1 $CEC_DEVICE"
+
+# Wait for the CEC device to appear (max 10 seconds)
+for i in {1..10}; do
+  if [ -e "$CEC_DEVICE" ]; then
+    echo "[CEC-LISTENER] Found CEC device: $CEC_DEVICE"
+    break
+  fi
+  echo "[CEC-LISTENER] Waiting for $CEC_DEVICE to appear... ($i/10)"
+  sleep 1
+  if [ $i -eq 10 ]; then
+    echo "[CEC-LISTENER] Error: $CEC_DEVICE not found after 10 seconds. Exiting." >&2
+    exit 1
+  fi
+done
+
+# Wait for Wayland session (WAYLAND_DISPLAY) to be set (max 20 seconds)
+for i in {1..20}; do
+  if [ -n "$WAYLAND_DISPLAY" ]; then
+    echo "[CEC-LISTENER] Wayland session detected: $WAYLAND_DISPLAY"
+    break
+  fi
+  echo "[CEC-LISTENER] Waiting for Wayland session (WAYLAND_DISPLAY)... ($i/20)"
+  sleep 1
+  if [ $i -eq 20 ]; then
+    echo "[CEC-LISTENER] Error: WAYLAND_DISPLAY not set after 20 seconds. Exiting." >&2
+    exit 1
+  fi
+  # Try to source it from the environment if possible
+  if [ -f "/run/user/$(id -u)/wayland-0" ]; then
+    export WAYLAND_DISPLAY="wayland-0"
+  fi
+  # Optionally, try to source from loginctl if available
+  if command -v loginctl &> /dev/null; then
+    export WAYLAND_DISPLAY=$(loginctl show-session $(loginctl | grep $(id -u) | awk '{print $1}') -p Display --value 2>/dev/null)
+  fi
+  # Re-check
+  if [ -n "$WAYLAND_DISPLAY" ]; then
+    echo "[CEC-LISTENER] Wayland session detected: $WAYLAND_DISPLAY"
+    break
+  fi
+  sleep 1
+  # (double sleep for robustness)
+  if [ $i -eq 20 ]; then
+    echo "[CEC-LISTENER] Error: WAYLAND_DISPLAY not set after 20 seconds. Exiting." >&2
+    exit 1
+  fi
+done
 
 # Global variable to track shutdown confirmation window
 declare -i SHUTDOWN_PENDING=0
@@ -135,6 +183,52 @@ handle_cec_command() {
     "44:73")  # Green
       echo "[CEC-LISTENER] Green key pressed"
       ;;
+    # Unmapped number keys
+    "44:21")  # 1
+      # 1 button unmapped
+      ;;
+    "44:22")  # 2
+      # 2 button unmapped
+      ;;
+    "44:23")  # 3
+      # 3 button unmapped
+      ;;
+    "44:24")  # 4
+      # 4 button unmapped
+      ;;
+    "44:25")  # 5
+      # 5 button unmapped
+      ;;
+    "44:26")  # 6
+      # 6 button unmapped
+      ;;
+    "44:27")  # 7
+      # 7 button unmapped
+      ;;
+    "44:28")  # 8
+      # 8 button unmapped
+      ;;
+    "44:29")  # 9
+      # 9 button unmapped
+      ;;
+    "44:20")  # 0
+      # 0 button unmapped
+      ;;
+    "44:0d")  # Return
+      # Return button unmapped
+      ;;
+    "44:0c")  # Exit
+      # Exit button unmapped
+      ;;
+    "44:48")  # Previous
+      # Previous button unmapped
+      ;;
+    "44:44")  # Play
+      # Play button unmapped
+      ;;
+    "44:46")  # Pause
+      # Pause button unmapped
+      ;;
     # Add more cases as needed
     *)
       echo "[CEC-LISTENER] Unhandled keycode: $1"
@@ -218,11 +312,19 @@ cancel_yellow_pending() {
 # Use a named pipe to allow real-time dialog control
 CEC_PIPE=$(mktemp -u)
 mkfifo "$CEC_PIPE"
-trap 'rm -f "$CEC_PIPE"' EXIT
 
 # Start cec-client in the background, writing to the pipe
 $CEC_CLIENT_CMD > "$CEC_PIPE" &
 CEC_CLIENT_PID=$!
+
+# Trap to clean up on exit (SIGINT, SIGTERM, EXIT)
+cleanup() {
+  echo "[CEC-LISTENER] Cleaning up: killing cec-client (PID $CEC_CLIENT_PID) and removing pipe."
+  kill $CEC_CLIENT_PID 2>/dev/null
+  rm -f "$CEC_PIPE"
+  wait $CEC_CLIENT_PID 2>/dev/null
+}
+trap cleanup SIGINT SIGTERM EXIT
 
 while read -r line < "$CEC_PIPE"; do
   echo "[CEC-LISTENER] cec-client output: $line"
@@ -232,8 +334,6 @@ while read -r line < "$CEC_PIPE"; do
     handle_cec_command "$keycode"
   fi
 done
-
-wait $CEC_CLIENT_PID
 
 status=$?
 if [ $status -ne 0 ]; then
